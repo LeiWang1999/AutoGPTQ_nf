@@ -165,3 +165,8 @@ log/
 log*.txt
 
 models/
+
+.nnidatabase
+
+progress/
+

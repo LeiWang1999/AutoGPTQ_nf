@@ -15,10 +15,13 @@ except:
     AUTOGPTQ_CUDA_AVAILABLE = False
 
 
-def dynamically_import_QuantLinear(use_triton: bool, desc_act: bool, group_size: int, format: str):
+def dynamically_import_QuantLinear(use_triton: bool, use_tvm:bool, desc_act: bool, group_size: int, format: str):
     if format == 'nf':
-        # from ..nn_modules.qlinear.qlinear_cuda_nf import QuantLinear
-        from ..nn_modules.qlinear.qlinear_cuda_nf_nnfusion import QuantLinear
+        if use_tvm:
+            from ..nn_modules.qlinear.qlinear_tvm import QuantLinear
+            # from ..nn_modules.qlinear.qlinear_cuda_nf_nnfusion import QuantLinear
+        else:
+            from ..nn_modules.qlinear.qlinear_cuda_nf import QuantLinear
     elif use_triton:
         from ..nn_modules.qlinear.qlinear_triton import QuantLinear
     else:

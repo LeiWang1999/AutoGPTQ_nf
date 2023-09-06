@@ -58,11 +58,12 @@ def make_quant(
     group_size,
     name='',
     use_triton=False,
+    use_tvm=False,
     use_cuda_fp16=True,
     desc_act=False,
     trainable=False
 ):
-    QuantLinear = dynamically_import_QuantLinear(use_triton=use_triton, desc_act=desc_act, group_size=group_size, format=format)
+    QuantLinear = dynamically_import_QuantLinear(use_triton=use_triton, use_tvm=use_tvm, desc_act=desc_act, group_size=group_size, format=format)
 
     if isinstance(module, QuantLinear):
         return
@@ -98,6 +99,7 @@ def make_quant(
             group_size,
             name + '.' + name1 if name != '' else name1,
             use_triton=use_triton,
+            use_tvm=use_tvm,
             use_cuda_fp16=use_cuda_fp16,
             desc_act=desc_act,
             trainable=trainable
@@ -111,20 +113,21 @@ def pack_model(
     format,
     group_size,
     use_triton=False,
+    use_tvm=False,
     use_cuda_fp16=True,
     desc_act=False,
     warmup_triton: bool = False,
     force_layer_back_to_cpu: bool = False
 ):
-    QuantLinear = dynamically_import_QuantLinear(use_triton=use_triton, desc_act=desc_act, group_size=group_size, format=format)
-
+    QuantLinear = dynamically_import_QuantLinear(use_triton=use_triton, use_tvm=use_tvm, desc_act=desc_act, group_size=group_size, format=format)
+    print(QuantLinear)
     if force_layer_back_to_cpu:
         model.to(CPU)
 
     logger.info('Packing model...')
     layers = find_layers(model)
     layers = {n: layers[n] for n in quantizers}
-    make_quant(model, quantizers, bits, format, group_size, use_triton=use_triton, use_cuda_fp16=use_cuda_fp16, desc_act=desc_act)
+    make_quant(model, quantizers, bits, format, group_size, use_triton=use_triton, use_tvm=use_tvm, use_cuda_fp16=use_cuda_fp16, desc_act=desc_act)
     qlayers = find_layers(model, [QuantLinear])
     for name in qlayers:
         logger.info(name)
@@ -193,8 +196,8 @@ def simple_dispatch_model(model, device_map):
     return model
 
 
-def make_sure_no_tensor_in_meta_device(model, use_triton, desc_act, group_size):
-    QuantLinear = dynamically_import_QuantLinear(use_triton, desc_act, group_size)
+def make_sure_no_tensor_in_meta_device(model, use_triton, use_tvm, desc_act, group_size):
+    QuantLinear = dynamically_import_QuantLinear(use_triton, use_tvm, desc_act, group_size)
     for n, m in model.named_modules():
         if isinstance(m, QuantLinear) and m.bias.device == torch.device("meta"):
             m.register_buffer('bias', torch.zeros((m.outfeatures), dtype=torch.float16, device="cpu"))

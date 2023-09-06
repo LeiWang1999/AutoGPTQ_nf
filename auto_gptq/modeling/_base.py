@@ -203,6 +203,7 @@ class BaseGPTQForCausalLM(nn.Module, PushToHubMixin):
         examples: List[Dict[str, Union[List[int], torch.LongTensor]]],
         batch_size: int = 1,
         use_triton: bool = False,
+        use_tvm: bool = False,
         use_cuda_fp16: bool = True,
         autotune_warmup_after_quantized: bool = False,
         cache_examples_on_gpu: bool = True
@@ -448,6 +449,7 @@ class BaseGPTQForCausalLM(nn.Module, PushToHubMixin):
             format=self.quantize_config.format,
             group_size=self.quantize_config.group_size,
             use_triton=use_triton,
+            use_tvm=use_tvm,
             use_cuda_fp16=use_cuda_fp16,
             desc_act=self.quantize_config.desc_act,
             warmup_triton=autotune_warmup_after_quantized,
@@ -663,6 +665,7 @@ class BaseGPTQForCausalLM(nn.Module, PushToHubMixin):
         device: Optional[Union[str, int]] = None,
         low_cpu_mem_usage: bool = False,
         use_triton: bool = False,
+        use_tvm: bool = False,
         torch_dtype: torch.dtype = torch.float16,
         inject_fused_attention: bool = True,
         inject_fused_mlp: bool = True,
@@ -797,6 +800,7 @@ class BaseGPTQForCausalLM(nn.Module, PushToHubMixin):
                 quantize_config.format,
                 quantize_config.group_size,
                 use_triton=use_triton,
+                use_tvm=use_tvm,
                 use_cuda_fp16=use_cuda_fp16,
                 desc_act=quantize_config.desc_act,
                 trainable=trainable
@@ -892,7 +896,7 @@ class BaseGPTQForCausalLM(nn.Module, PushToHubMixin):
 
         # == step7: make model compatible with peft
         cls.make_sure_compatible_with_peft(
-            model, use_triton, quantize_config.desc_act, quantize_config.group_size, quantize_config.format
+            model, use_triton, use_tvm, quantize_config.desc_act, quantize_config.group_size, quantize_config.format
         )
 
         return cls(
@@ -929,10 +933,10 @@ class BaseGPTQForCausalLM(nn.Module, PushToHubMixin):
         self.enable_trainable_mode(enabled=False)
 
     @staticmethod
-    def make_sure_compatible_with_peft(model: PreTrainedModel, use_triton: bool, desc_act: bool, group_size: int, format: str):
+    def make_sure_compatible_with_peft(model: PreTrainedModel, use_triton: bool, use_tvm: bool, desc_act: bool, group_size: int, format: str):
         GeneralQuantLinear.inject_to_model(
             model,
-            dynamically_import_QuantLinear(use_triton, desc_act, group_size, format)
+            dynamically_import_QuantLinear(use_triton, use_tvm, desc_act, group_size, format)
         )
 
     def __getattr__(self, item):

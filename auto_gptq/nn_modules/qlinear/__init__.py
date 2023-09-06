@@ -18,12 +18,15 @@ class GeneralQuantLinear(nn.Linear):
         self.weight.requires_grad = False
 
         self.weight.data = quant_linear_module.qweight
-        self.qweight = self.weight
+        self.register_buffer('qweight', quant_linear_module.qweight)
         self.bias.data = quant_linear_module.bias
 
         self.qweight.requires_grad = False
         self.bias.requires_grad = False
-
+        
+        self.register_buffer('scales', quant_linear_module.scales)
+        self.register_buffer('g_idx', quant_linear_module.g_idx)
+        
         if hasattr(quant_linear_module, "qzeros"):
             self.qzeros = quant_linear_module.qzeros
         self.scales = quant_linear_module.scales
