@@ -30,14 +30,23 @@ def get_handler(bits: int, n: int, k: int, group_size: int = -1):
                     handler = TVMHandler(bits=bits, n=n, k=k, group_size=group_size, load_from_cache=True)
                     for candidate in handler.m_candidates:
                         if candidate == 1:
-                            func_name = handler_database[key][f"m{candidate}"]["func_name"]
-                            code = handler_database[key][f"m{candidate}"]["code"]
+                            mx = f"m1n{n}k{k}g{group_size}"
+                            func_name = handler_database[key][mx]["func_name"]
+                            code = handler_database[key][mx]["code"]
                             executable = TVMExecutable(src=code, name=func_name)
-                            params = handler_database[key][f"m{candidate}"]["params"]
-                            handler.configurations[f"m{candidate}"] = params
-                            setattr(handler, f"m{candidate}", executable)
+                            params = handler_database[key][mx]["params"]
+                            handler.configurations[mx] = params
+                            setattr(handler, mx, executable)
                         else:
                             mx = f"m{candidate}n{n}k{k}g{group_size}"
+                            func_name = handler_database[key][mx]["func_name"]
+                            code = handler_database[key][mx]["code"]
+                            executable = TVMExecutable(src=code, name=func_name)
+                            params = handler_database[key][mx]["params"]
+                            handler.configurations[mx] = params
+                            setattr(handler, mx, executable)
+                            
+                            mx = f"m{candidate}n{n}k{k}g{group_size}_prmt"
                             func_name = handler_database[key][mx]["func_name"]
                             code = handler_database[key][mx]["code"]
                             executable = TVMExecutable(src=code, name=func_name)
@@ -55,15 +64,29 @@ def get_handler(bits: int, n: int, k: int, group_size: int = -1):
             _dump = {}
             for candidate in candidates:
                 if candidate == 1:
-                    _c = f"m{candidate}"
+                    _c = f"m1n{n}k{k}g{group_size}"
+                    executable = getattr(handler, _c)
+                    _dump[_c] = {
+                        "func_name": executable.func_name,
+                        "code": executable.source_code,
+                        "params": handler.configurations[_c]
+                    }
                 else:
                     _c = f"m{candidate}n{n}k{k}g{group_size}"
-                executable = getattr(handler, _c)
-                _dump[_c] = {
-                    "func_name": executable.func_name,
-                    "code": executable.source_code,
-                    "params": handler.configurations[_c]
-                }
+                    executable = getattr(handler, _c)
+                    _dump[_c] = {
+                        "func_name": executable.func_name,
+                        "code": executable.source_code,
+                        "params": handler.configurations[_c]
+                    }
+                    
+                    _p = f"m{candidate}n{n}k{k}g{group_size}_prmt"
+                    executable = getattr(handler, _p)
+                    _dump[_p] = {
+                        "func_name": executable.func_name,
+                        "code": executable.source_code,
+                        "params": handler.configurations[_p]
+                    }
                 
             handler_database[key] = _dump
             with open(os.path.join(cache_dir, cache_file), "w") as f:

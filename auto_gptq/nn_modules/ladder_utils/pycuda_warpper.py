@@ -11,10 +11,8 @@ from .workloads import (
     get_gemv_workloads_nf4,
     get_gemm_workloads,
     get_gemm_workloads_nf4,
-    _apply_gemm_schedule,
-    _apply_gemv_schedule,
     _apply_gemv_schedule_nf4,
-    _apply_dynamic_gemm_schedule_nf4,
+    get_permutate_workloads
 )
 import welder
 from welder.graph import IRNode, OutputNode
@@ -406,8 +404,11 @@ class TVMExecutable(object):
         self.func_name: str = name
         self.kernel_func = self._get_kernel(self.source_code, self.func_name)
 
-    def __call__(self, input, qweight, output, scales, g_idx, lut, M, grid, block, format="nf4") -> Any:
-        self.kernel_func(TensorHolder(input), TensorHolder(qweight), TensorHolder(lut), TensorHolder(scales), TensorHolder(output), grid=tuple(grid), block=tuple(block))
+    def __call__(self, input, qweight=None, output=None, scales=None, g_idx=None, lut=None, M=None, grid=None, block=None, format="nf4") -> Any:
+        if qweight is not None and output is not None and scales is not None:
+            self.kernel_func(TensorHolder(input), TensorHolder(qweight), TensorHolder(lut), TensorHolder(scales), TensorHolder(output), grid=tuple(grid), block=tuple(block))
+        else:
+            self.kernel_func(TensorHolder(input), TensorHolder(output), grid=tuple(grid), block=tuple(block))
 
     def _get_kernel(self, src_code, name):
         src = torch.cuda.ByteTensor(8)
@@ -423,21 +424,21 @@ class TVMHandler(object):
         self.bits = bits
         self.group_size = group_size
         self.format = format
-        self.m_candidates = [1, 16, 32, 64, 128, 256, 512, 1024]
-        self._apply_gemv_schedule = _apply_gemv_schedule_nf4 if format == "nf4" else _apply_gemv_schedule
-        
+        self.m_candidates = [1, 16, 32, 64, 128, 256, 512]
+        self.workspace = torch.zeros((1024, k), dtype=torch.float16, device="cuda")
         self.configurations = {
-            'm1':
+            f'm1n{n}k{k}g{group_size}':
                 {
                     'num_warps': 4
                 },
         }
-
         if not load_from_cache:
             for m in self.m_candidates:
                 if m == 1:
-                    self.m1: TVMExecutable = self._get_executable_m1(bits, n, k, group_size)
+                    setattr(self, f'm1n{n}k{k}g{group_size}', self._get_executable_m1(bits, n, k, group_size))
                 else:
+                    setattr(self, f'm{m}n{n}k{k}g{group_size}_prmt', self._get_permutate_mx(
+                    bits, m, n, k, group_size))
                     setattr(self, f'm{m}n{n}k{k}g{group_size}', self._get_executable_mx(
                     bits, m, n, k, group_size))
 
@@ -451,66 +452,58 @@ class TVMHandler(object):
         group_size = self.group_size
         args = (input, qweight, output, scales,
                     g_idx, lut, M)
+        
+        def ladder_call_mx(mx):
+            prmt = f"{mx}_prmt"
+            mx_config = self.configurations[prmt]
+            block = mx_config['block_size']
+            grid = mx_config['grid_size']
+            _func = getattr(self, prmt)
+            _func(input=args[0], output=self.workspace, block=block, grid=grid)
+            new_args = (self.workspace, *args[1:])
+            mx_config = self.configurations[mx]
+            block = mx_config['block_size']
+            grid = mx_config['grid_size']
+            _func = getattr(self, mx)
+            _func(*new_args, block=block, grid=grid)
+
         if M == 1:
-            m1_config = self.configurations['m1']
+            m1_config = self.configurations[f'm1n{N}k{K}g{group_size}']
             block = (32, m1_config['num_warps'], 1)
             grid = (N // m1_config['num_warps'], 1, 1)
-            self.m1(*args, block=block, grid=grid)
+            _func = getattr(self, f'm1n{N}k{K}g{group_size}')
+            _func(*args, block=block, grid=grid)
         elif 1< M <= 16:
             mx = f'm16n{N}k{K}g{group_size}'
-            mx_config = self.configurations[mx]
-            block = mx_config['block_size']
-            grid = mx_config['grid_size']
-            _func = getattr(self, mx)
-            _func(*args, block=block, grid=grid)
+            ladder_call_mx(mx)
         elif 16 < M <= 32:
             mx = f'm32n{N}k{K}g{group_size}'
-            mx_config = self.configurations[mx]
-            block = mx_config['block_size']
-            grid = mx_config['grid_size']
-            _func = getattr(self, mx)
-            _func(*args, block=block, grid=grid)
+            ladder_call_mx(mx)
         elif 32 < M <= 64:
             mx = f'm64n{N}k{K}g{group_size}'
-            mx_config = self.configurations[mx]
-            block = mx_config['block_size']
-            grid = mx_config['grid_size']
-            _func = getattr(self, mx)
-            _func(*args, block=block, grid=grid)
+            ladder_call_mx(mx)
         elif 64 < M <= 128:
             mx = f'm128n{N}k{K}g{group_size}'
-            mx_config = self.configurations[mx]
-            block = mx_config['block_size']
-            grid = mx_config['grid_size']
-            _func = getattr(self, mx)
-            _func(*args, block=block, grid=grid)
+            ladder_call_mx(mx)
         elif 128 < M <= 256:
             mx = f'm256n{N}k{K}g{group_size}'
-            mx_config = self.configurations[mx]
-            block = mx_config['block_size']
-            grid = mx_config['grid_size']
-            _func = getattr(self, mx)
-            _func(*args, block=block, grid=grid)
+            ladder_call_mx(mx)
         elif 256 < M <= 512:
             mx = f'm512n{N}k{K}g{group_size}'
-            mx_config = self.configurations[mx]
-            block = mx_config['block_size']
-            grid = mx_config['grid_size']
-            _func = getattr(self, mx)
-            _func(*args, block=block, grid=grid)
+            ladder_call_mx(mx)
         elif 512 < M <= 1024:
             mx = f'm1024n{N}k{K}g{group_size}'
-            mx_config = self.configurations[mx]
-            block = mx_config['block_size']
-            grid = mx_config['grid_size']
-            _func = getattr(self, mx)
-            _func(*args, block=block, grid=grid)
+            ladder_call_mx(mx)
 
     def _get_executable_m1(self, bits: int, n: int, k: int, group_size: int = -1):
         # get src code
-        m1_module = get_gemv_workloads_nf4(bits, n, k, group_size)
-        num_warps = self.configurations['m1']['num_warps']
-        m1_mod = self._apply_gemv_schedule(m1_module, bits, k, num_warps)
+        if group_size == -1:
+            group_size = k
+        mx = f'm1n{n}k{k}g{group_size}'
+        args = get_gemv_workloads_nf4(bits, n, k, group_size)
+        m1_module = te.create_prim_func(args)
+        num_warps = self.configurations[mx]['num_warps']
+        m1_mod = _apply_gemv_schedule_nf4(m1_module, bits, k, num_warps)
         code = m1_mod.imported_modules[0].get_source()
         name = f"tir_halfxnf{bits}_simt_bn{num_warps}_n{n}_k{k}"
         code = code.replace(
@@ -525,13 +518,13 @@ class TVMHandler(object):
         arch = welder.arch.__getattribute__(arch)()
         mx = f'm{m}n{n}k{k}g{group_size}'
         args = get_gemm_workloads_nf4(bits, m, n, k, group_size)
-        input_args = args[:4]
+        input_args = args[:-1]
         output_args = [args[-1]]
-        node = IRNode([None for _ in input_args], args, "cutlass_matmul_nf4")
-        node.add_tag("tensorCoreConfig", [0, 1])
-        # node.add_tag("ladder_config", (False, False))
+        node = IRNode([None for _ in input_args], args, "ladder_gemm")
+        node.add_tag("tensorCoreConfig", [2, 3])
+        node.add_tag("ladder_config", (True, True))
         output_nodes = [OutputNode(node)]
-        policy = TCPolicy(output_nodes, arch)
+        policy = LadderPolicy(output_nodes, arch)
         configs = policy.emit_config(20)
 
         compile_results = []
@@ -558,102 +551,83 @@ class TVMHandler(object):
             
         grid_size = tuple(best.grid_size)
         block_size = tuple(best.block_size)
+        
+        grid_size = [int(x) for x in grid_size]
+        block_size = [int(x) for x in block_size]
+        
         # create mx
         self.configurations[mx] = {}
         self.configurations[mx]['block_size'] = block_size
         self.configurations[mx]['grid_size'] = grid_size
-        BM, BN = best.config[node].block
+        _block = best.config[node].block
+        if len(_block) == 4:
+            BM = _block[0] * _block[2]
+            BN = _block[1] * _block[3]
+        else:
+            BM, BN = _block[:2]
         BK = best.config[node].rstep[0]
-        wmma_m, wmma_n, wmma_k = best.config[node].wmma
-        # mx_mod = _apply_dynamic_gemm_schedule_nf4(bits, m, n, k, group_size, mx_config)
         name = f"tir_halfx{self.format}_tensorop_{BM}x{BN}x{BK}_K{k}_align8"
         code = best.code
         code = code.replace(
             "_fused_kernel_", name)
         code = code.replace("__global__ void __launch_bounds__", f'extern "C" __global__ void __launch_bounds__')
         code = "#include <mma.h>\n" + code
-        code = cutlass_header + cuda_fp16_header + code
+        code = cuda_fp16_header + code
         return TVMExecutable(code, name)
     
+    def _get_permutate_mx(self, bits: int, m:int, n: int, k: int, group_size: int = -1):
+        arch = "cuda"
+        arch = welder.arch.__getattribute__(arch)()
+        mx = f'm{m}n{n}k{k}g{group_size}_prmt'
+        args = get_permutate_workloads(bits, m, n, k, group_size)
+        input_args = args[:-1]
+        output_args = [args[-1]]
+        node = IRNode([None for _ in input_args], args, "ladder_permutate")
+        output_nodes = [OutputNode(node)]
+        policy = DefaultPolicy(output_nodes, arch)
+        configs = policy.emit_config(20)
 
-def bit_compress(x, bits, axis):
-    if bits == 3:
-        # given a tensor x (M, K), which only the low bits bits have value, we can compress it to (M, K // 8 * bits)
-        shape = x.shape
-        qshape = shape[:axis] + (shape[axis] // 32 * bits,) + shape[axis + 1:]
-        qweight = np.zeros(qshape).astype("int32")
-        mask = (1 << bits) - 1
-        for row in range(qweight.shape[0]):
-            # print("compressing: ", row)
-            weight = x[row]
-            # compress consective 32 weight 32-bit(actually is only 3bit value) integers into 3 32-bit integers
-            i = 0
-            col = 0
-            while col < qweight.shape[1]:
-                for j in range(i, i + 10):
-                    qweight[row, col] |= weight[j] << (3 * (j - i))
-                i += 10
-                qweight[row, col] |= weight[i] << 30
-                col += 1
-                qweight[row, col] |= (weight[i] >> 2) & 1
-                i += 1
-                for j in range(i, i + 10):
-                    qweight[row, col] |= weight[j] << (3 * (j - i) + 1)
-                i += 10
-                qweight[row, col] |= weight[i] << 31
-                col += 1
-                qweight[row, col] |= (weight[i] >> 1) & 0x3
-                i += 1
-                for j in range(i, i + 10):
-                    qweight[row, col] |= weight[j] << (3 * (j - i) + 2)
-                i += 10
-                col += 1
-        # convert to int8 in meomory view
-        qweight = qweight.view("int8")
-        return qweight
-    elif bits == 4:
-        shape = x.shape
-        compress_shape = shape[:axis] + \
-            (shape[axis] // 8 * bits,) + shape[axis + 1:]
-        _compressed = np.zeros(compress_shape).astype("int8")
-        mask = (1 << bits) - 1
-        for i in range(shape[axis]):
-            val = (x[..., i] & mask).astype("int8")
-            _compressed[..., i // (8 // bits)] |= (val <<
-                                                   ((i % (8 // bits)) * bits)).astype("int8")
-        return _compressed
-
-
-def gemv_test(M, N, K):
-    handler = TVMHandler(bits=3, n=N, k=K, group_size=-1)
-    x = torch.rand((M, K), dtype=torch.float16).cuda()
-    w = (np.arange(N * K) % 4).reshape((N, K)).astype("int8")
-    qw = bit_compress(w, 3, 1)
-    print(np.matmul(x.cpu().numpy(), w.T))
-    w = torch.from_numpy(w).cuda()
-    qw = torch.from_numpy(qw).cuda()
-    scales = torch.ones(N, dtype=torch.float16).cuda()
-    zeros = torch.zeros(N, dtype=torch.float16).cuda()
-    y = torch.zeros((M, N), dtype=torch.float16).cuda()
-    handler(x, qw, y, scales, zeros)
-    print(y.cpu().numpy())
-    return y
-
-
-if __name__ == '__main__':
-    M = 17
-    N = 17920
-    K = 6656
-    handler = TVMHandler(bits=4, n=N, k=K, group_size=-1)
-    x = torch.ones((M, K), dtype=torch.float16).cuda()
-    w = (np.arange(N * K) % 4).reshape((N, K)).astype("int8")
-    # qw = bit_compress(w, 3, 1)
-    qw = np.random.randint(0, 8, (N, K // 8 * 4)).astype("int8")
-    print(np.matmul(x.cpu().numpy(), w.T))
-    w = torch.from_numpy(w).cuda()
-    qw = torch.from_numpy(qw).cuda()
-    scales = torch.ones(N, dtype=torch.float16).cuda()
-    zeros = torch.zeros(N, dtype=torch.float16).cuda()
-    y = torch.zeros((32, N), dtype=torch.float16).cuda()
-    handler(x, qw, y, scales, zeros)
-    print(y)
+        compile_results = []
+        cgen = welder.CodeGenerator()
+        for config in configs:
+            cpresult = cgen.compile(output_nodes, config, "cuda", kernel_name="_fused_kernel_")
+            compile_results.append(cpresult)
+        welder.utils.compile_and_load_parallel(compile_results, arch)
+        best_latency = 10000
+        best = None
+        values = []
+        for cpresult in compile_results:
+            print(cpresult.config)
+            code = cpresult.code
+            if cpresult.lib is None:
+                latency = 10000
+            else:
+                latency = cpresult.profile()
+            values.append(latency)
+            if latency < best_latency:
+                best_latency = latency
+                best = cpresult
+            print(latency)
+            
+        grid_size = tuple(best.grid_size)
+        block_size = tuple(best.block_size)
+        grid_size = [int(x) for x in grid_size]
+        block_size = [int(x) for x in block_size]
+        # create mx
+        self.configurations[mx] = {}
+        self.configurations[mx]['block_size'] = block_size
+        self.configurations[mx]['grid_size'] = grid_size
+        _block = best.config[node].block
+        if len(_block) == 4:
+            BM = _block[0] * _block[2]
+            BN = _block[1] * _block[3]
+        else:
+            BM, BN = _block[:2]
+        name = f"tir_halfx{self.format}_simtop_{BM}x{BN}_K{k}_prmt"
+        code = best.code
+        code = code.replace(
+            "_fused_kernel_", name)
+        code = code.replace("__global__ void __launch_bounds__", f'extern "C" __global__ void __launch_bounds__')
+        code = "#include <mma.h>\n" + code
+        code = cuda_fp16_header + code
+        return TVMExecutable(code, name)
